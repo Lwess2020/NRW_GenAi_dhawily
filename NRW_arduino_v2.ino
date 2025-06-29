@@ -8,37 +8,21 @@ const int motorPin4 = 4;   // Right motor backward (PWM)
 const int enablePin1 = 9;  // Left motor speed control
 const int enablePin2 = 10; // Right motor speed control
 
-// Emergency stop button pin
-const int stopPin = 2;
-
 // Movement parameters
-int motorSpeed = 200;  // Default speed (0-255)100
+int motorSpeed = 144;      // Default speed (0-255)
 int distance = 0;
-int adjustedDistance = 0;
 int angle = 0;
 int cars = 0;
 
 // Timing and state control
 unsigned long previousMillis = 0;
+unsigned long movementStartTime = 0;
+unsigned long movementDuration = 0;
 const long interval = 100;  // Control interval in ms
-volatile bool stopFlag = false;
 
 // Movement states
 enum State { IDLE, MOVING_FORWARD, MOVING_BACKWARD, TRACE, TURNING_LEFT, TURNING_RIGHT };
 State currentState = IDLE;
-
-// Exponential growth constant
-const float exp_grow = 0.001;
-float growthFactor = 0.0;
-// Interrupt handler for emergency stop
-void stopInterrupt() {
-  stopFlag = true;
-}
-
-// Exponential growth function for distance adjustment
-float expGrowth(unsigned long time) {
-  return exp(exp_grow * time);
-}
 
 void setup() {
   Serial.begin(9600);
@@ -50,19 +34,18 @@ void setup() {
   pinMode(motorPin4, OUTPUT);
   pinMode(enablePin1, OUTPUT);
   pinMode(enablePin2, OUTPUT);
+  
+  // Initialize all motors to stop
   digitalWrite(motorPin1, LOW);
   digitalWrite(motorPin2, LOW);
   digitalWrite(motorPin3, LOW);
   digitalWrite(motorPin4, LOW);
+  
   // Set initial motor speeds
   analogWrite(enablePin1, motorSpeed);
   analogWrite(enablePin2, motorSpeed-10);
   
-  // Setup emergency stop
-  //pinMode(stopPin, INPUT_PULLUP);
-  //attachInterrupt(digitalPinToInterrupt(stopPin), stopInterrupt, FALLING);
-  
-  Serial.println("Robot ready. Waiting for commands (F50/B30/L90/R45/S)");
+  Serial.println("Robot ready. Waiting for commands (F50/B30/L90/R45/T3/S)");
 }
 
 void handleLeftTurn() {
@@ -107,13 +90,106 @@ void stop() {
   currentState = IDLE;
 }
 
-void loop() {
-  // Check for emergency stop
-  if (stopFlag) {
+void handleForwardMovement() {
+  // Move forward
+  digitalWrite(motorPin1, HIGH);
+  digitalWrite(motorPin2, LOW);
+  digitalWrite(motorPin3, HIGH);
+  digitalWrite(motorPin4, LOW);
+
+  // Check if movement duration has elapsed
+  if (millis() - movementStartTime >= movementDuration) {
     stop();
-    stopFlag = false;
+    currentState = IDLE;
+    Serial.println("Forward movement completed");
+  }
+}
+
+void handleBackwardMovement() {
+  // Move backward
+  digitalWrite(motorPin1, LOW);
+  digitalWrite(motorPin2, HIGH);
+  digitalWrite(motorPin3, LOW);
+  digitalWrite(motorPin4, HIGH);
+
+  // Check if movement duration has elapsed
+  if (millis() - movementStartTime >= movementDuration) {
+    stop();
+    currentState = IDLE;
+    Serial.println("Backward movement completed");
+  }
+}
+
+void handleTrace() {
+  static int completedSlots = 0;
+  static unsigned long lastStepTime = 0;
+  static int traceState = 0; // 0=forward, 1=turn, 2=short forward, 3=turn
+  
+  if (completedSlots >= cars) {
+    stop();
+    currentState = IDLE;
+    completedSlots = 0;
+    Serial.println("Tracing completed");
+    return;
   }
 
+  unsigned long currentTime = millis();
+  
+  switch(traceState) {
+    case 0: // Initial forward
+      if (currentTime - lastStepTime < 2000) {
+        digitalWrite(motorPin1, LOW);
+        digitalWrite(motorPin2, HIGH);
+        digitalWrite(motorPin3, LOW);
+        digitalWrite(motorPin4, HIGH);
+      } else {
+        traceState = 1;
+        lastStepTime = currentTime;
+      }
+      break;
+      
+    case 1: // Turn left
+      if (currentTime - lastStepTime < 400) {
+        digitalWrite(motorPin1, LOW);
+        digitalWrite(motorPin2, HIGH);
+        digitalWrite(motorPin3, HIGH);
+        digitalWrite(motorPin4, LOW);
+      } else {
+        traceState = 2;
+        lastStepTime = currentTime;
+      }
+      break;
+      
+    case 2: // Short forward
+      if (currentTime - lastStepTime < 1000) {
+        digitalWrite(motorPin1, LOW);
+        digitalWrite(motorPin2, HIGH);
+        digitalWrite(motorPin3, LOW);
+        digitalWrite(motorPin4, HIGH);
+      } else {
+        traceState = 3;
+        lastStepTime = currentTime;
+      }
+      break;
+      
+    case 3: // Turn left again
+      if (currentTime - lastStepTime < 400) {
+        digitalWrite(motorPin1, LOW);
+        digitalWrite(motorPin2, HIGH);
+        digitalWrite(motorPin3, HIGH);
+        digitalWrite(motorPin4, LOW);
+      } else {
+        traceState = 0;
+        lastStepTime = currentTime;
+        completedSlots++;
+        Serial.print("Completed slot ");
+        Serial.println(completedSlots);
+      }
+      break;
+  }
+}
+
+void loop() {
   // Handle movement based on current state
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= interval) {
@@ -158,9 +234,8 @@ void processCommand(String command) {
   switch (cmdType) {
     case 'F': // Forward
       distance = value;
-      growthFactor = expGrowth(millis());
-      adjustedDistance = int((distance) +(1 - growthFactor));
-      adjustedDistance = min(adjustedDistance, 150);
+      movementDuration = distance * 100; // 100ms per unit
+      movementStartTime = millis();
       currentState = MOVING_FORWARD;
       Serial.print("Moving forward ");
       Serial.print(distance);
@@ -169,21 +244,20 @@ void processCommand(String command) {
       
     case 'B': // Backward
       distance = value;
-      growthFactor = expGrowth(millis());
-      adjustedDistance =  int((distance/6) +(1 - growthFactor));
-      adjustedDistance = min(adjustedDistance, 150);
+      movementDuration = distance * 100; // 100ms per unit
+      movementStartTime = millis();
       currentState = MOVING_BACKWARD;
       Serial.print("Moving backward ");
       Serial.print(distance);
       Serial.println(" units");
       break;
 
-      case 'T': // Backward
+    case 'T': // Trace parking slots
       cars = value;
       currentState = TRACE;
       Serial.print("Tracing ");
       Serial.print(cars);
-      Serial.println(" Car slots");
+      Serial.println(" car slots");
       break;
       
     case 'L': // Left turn
@@ -212,87 +286,3 @@ void processCommand(String command) {
       break;
   }
 }
-
-void handleForwardMovement() {
-
-  // Move forward
-  digitalWrite(motorPin1, HIGH);
-  digitalWrite(motorPin2, LOW);
-  digitalWrite(motorPin3, HIGH);
-  digitalWrite(motorPin4, LOW);
-
-  adjustedDistance--;
-  
-  if (adjustedDistance <= 0) {
-    stop();
-    currentState = IDLE;
-    Serial.println("Forward movement completed");
-  }
-}
-
-void handleBackwardMovement() {
-
-  // Move backward
-  digitalWrite(motorPin1, LOW);
-  digitalWrite(motorPin2, HIGH);
-  digitalWrite(motorPin3, LOW);
-  digitalWrite(motorPin4, HIGH);
-
-  adjustedDistance-- ;
-  
-  if (adjustedDistance <= 0) {
-    stop();
-    currentState = IDLE;
-    Serial.println("Backward movement completed");
-  }
-}
-
-void handleTrace() {
- for (int i = 0; i< cars; i++)
-{
-  // Move forward
-  digitalWrite(motorPin1, LOW);
-  digitalWrite(motorPin2, HIGH);
-  digitalWrite(motorPin3, LOW);
-  digitalWrite(motorPin4, HIGH);
-  delay(20);
-  // Turn 90 left
-  digitalWrite(motorPin1, LOW);
-  digitalWrite(motorPin2, HIGH);
-  digitalWrite(motorPin3, HIGH);
-  digitalWrite(motorPin4, LOW);
-  delay(4);
-  // Move forward
-  digitalWrite(motorPin1, LOW);
-  digitalWrite(motorPin2, HIGH);
-  digitalWrite(motorPin3, LOW);
-  digitalWrite(motorPin4, HIGH);
-  delay(10);
-  // Turn 90 left
-  digitalWrite(motorPin1, LOW);
-  digitalWrite(motorPin2, HIGH);
-  digitalWrite(motorPin3, HIGH);
-  digitalWrite(motorPin4, LOW);
-  delay(4);
-  // Move forward
-  digitalWrite(motorPin1, LOW);
-  digitalWrite(motorPin2, HIGH);
-  digitalWrite(motorPin3, LOW);
-  digitalWrite(motorPin4, HIGH);
-  delay(20);
-  // Turn 90 left
-  digitalWrite(motorPin1, LOW);
-  digitalWrite(motorPin2, HIGH);
-  digitalWrite(motorPin3, HIGH);
-  digitalWrite(motorPin4, LOW);
-  delay(4);
-  // Move forward
-  digitalWrite(motorPin1, LOW);
-  digitalWrite(motorPin2, HIGH);
-  digitalWrite(motorPin3, LOW);
-  digitalWrite(motorPin4, HIGH);
-  delay(20);
-
-  Serial.println("Tracing completed"); 
-}}
-
